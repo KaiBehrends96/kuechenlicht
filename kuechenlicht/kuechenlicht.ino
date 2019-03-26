@@ -1,25 +1,33 @@
 #include <Adafruit_NeoPixel.h> /* Adafruit NeoPixel 1.1.8 */
 
+
 // hardware setup
 #define BUTTON_PIN 2
+#define BUTTON_PIN_SECOND 3
 #define LED_STRIP_DATA_PIN 7
 #define NUM_LEDS 500
 
+
 // debug options
-#define RAMPUP_ENABLE 0
-#define BOOT_MARKER_ENABLE 0
+//#define RAMPUP_ENABLE 0
+//#define BOOT_MARKER_ENABLE 0
+#define DEBUG
+
+
+
 
 enum app_mode : uint8_t {
 #ifdef RAMPUP_ENABLE
     ramp_up,
 #endif
-    black,
+    //black,
     rainbow2,
     white,
     rainbow20,
     rainbow20_stopped,
     horsemode,
     num_modes,
+    disabled,
 };
 
 struct app;
@@ -33,9 +41,11 @@ struct preemption_guard {
 
 struct app {
     void preempt_and_switch_to_next_mode();
+    void ENABLE();
     // get a guard object for the current mode
     preemption_guard begin_preemptible();
-    volatile app_mode mode;
+    volatile app_mode mode;   
+    volatile app_mode lastmode;
 };
 
 struct rainbow_state {
@@ -76,29 +86,61 @@ struct rainbow_state st_rainbow = {0};
 struct horsemode_state st_horsemode(100);
 struct white_state st_white ;
 
-void button_isr();
-
+void button_rise_isr();
+void button_fall_isr();
+unsigned long timepressed = 0;
+bool isOn = false;
+bool isOnOther = true;
+//unsigned long temp = 0;
 void setup() {
+#ifdef DEBUG
+    Serial.begin(9600);
+#endif
     pinMode(LED_BUILTIN, OUTPUT);
-    attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), button_isr, RISING);
+    pinMode(BUTTON_PIN, INPUT);
+    pinMode(BUTTON_PIN_SECOND, INPUT);
     strip.begin();
+    attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), button_rise_isr, RISING);
+    attachInterrupt(digitalPinToInterrupt(BUTTON_PIN_SECOND), button_fall_isr, FALLING);
     strip.show();
+    digitalWrite(LED_BUILTIN, HIGH);
+    
 }
 
 // button_isr bounce handling
-volatile int lastButtonPush = 0;
-void button_isr()
+//volatile int lastButtonPush = 0;
+void button_rise_isr()
 {
-    if (abs(millis() - lastButtonPush) <= 1000) {
-        return;
+    if((timepressed - millis()) < 50) {
+      return;
     }
-    a.preempt_and_switch_to_next_mode();
-    lastButtonPush = millis();
+#ifdef DEBUG
+    Serial.print("rise \n");
+#endif
+
+    timepressed = millis();
+}
+
+void button_fall_isr(){
+    noInterrupts();
+    unsigned long timeWasPressed = millis() - timepressed;
+        if (abs(timeWasPressed) > 500) { 
+#ifdef DEBUG
+            Serial.print("long \n");  
+#endif       
+            a.ENABLE();
+        } else if(abs(timeWasPressed) > 20) {
+#ifdef DEBUG
+            Serial.print("short \n");
+#endif
+            a.preempt_and_switch_to_next_mode();        
+        } 
+        interrupts();           
 }
 
 bool didStartInitSeq = false;
+void loop() {    
 
-void loop() {
 
 #ifdef BOOT_MARKER_ENABLE
     if (!didStartInitSeq) {
@@ -115,23 +157,49 @@ void loop() {
 
     switch (a.mode) {
         case app_mode::rainbow2:
+#ifdef DEBUG
+  Serial.print("rainbow2 \n");
+#endif
             st_rainbow.resume(2, guard);
             break;
         case app_mode::rainbow20:
+#ifdef DEBUG
+  Serial.print("rainbow20 \n");
+#endif
+            
             st_rainbow.resume(20, guard);
             break;
         case app_mode::rainbow20_stopped:
-            static_assert(app_mode::rainbow20_stopped == app_mode::rainbow20 + 1);
+            
+            //static_assert(app_mode::rainbow20_stopped == app_mode::rainbow20 + 1);
             break;
         case app_mode::horsemode:
+#ifdef DEBUG
+  Serial.print("horse \n");
+#endif
+            
             st_horsemode.resume(guard);
             break;
         case app_mode::white:
+#ifdef DEBUG
+  Serial.print("white \n");
+#endif
+            
             st_white.resume(guard, strip.Color(255, 255, 255));
             break;
+        case app_mode::disabled:
+#ifdef DEBUG
+   Serial.print("disabeld \n");
+#endif
+            
+            st_white.resume(guard, strip.Color(0, 0, 0));
+            
+            break;
+            /*
         case app_mode::black:
             st_white.resume(guard, strip.Color(0, 0, 0));
             break;
+            */
 #ifdef RAMPUP_ENABLE
         case app_mode::ramp_up:
             for (int r = 0; r < 3 && !guard.preempted(); r++) {
@@ -161,7 +229,19 @@ bool preemption_guard::preempted() {
     return app->mode != my_mode;
 }
 
+void app::ENABLE(){    
+    if (mode != app_mode::disabled) {
+        lastmode = mode;
+        mode = app_mode(app_mode::disabled);
+    } else {
+        mode = app_mode(lastmode);
+    }    
+}
+
 void app::preempt_and_switch_to_next_mode() {
+    if (mode == app_mode::disabled) {
+        return;
+    }     
     int newmode = mode + 1;
     if (newmode == app_mode::num_modes) {
         newmode = 0;
@@ -214,8 +294,8 @@ void horsemode_state::resume(preemption_guard g) {
     }
 }
 
-// Input a value 0 to 255 to get a color value.
 // The colours are a transition r - g - b - back to r.
+// Input a value 0 to 255 to get a color value.
 uint32_t rainbow_state::wheel(byte wheel_pos) {
     if(wheel_pos < 85) {
         return strip.Color(wheel_pos * 3, 255 - wheel_pos * 3, 0);
@@ -238,4 +318,3 @@ void white_state::resume(preemption_guard g, uint32_t color) {
         strip.show();
     }
 };
-
