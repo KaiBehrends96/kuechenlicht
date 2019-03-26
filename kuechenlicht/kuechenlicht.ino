@@ -1,13 +1,24 @@
-#include <Adafruit_NeoPixel.h>
+#include <Adafruit_NeoPixel.h> /* Adafruit NeoPixel 1.1.8 */
+
+// hardware setup
+#define BUTTON_PIN 2
+#define LED_STRIP_DATA_PIN 7
+#define NUM_LEDS 500
+
+// debug options
+#define RAMPUP_ENABLE 0
+#define BOOT_MARKER_ENABLE 0
 
 enum app_mode : uint8_t {
+#ifdef RAMPUP_ENABLE
+    ramp_up,
+#endif
+    black,
     rainbow2,
-    rainbow5,
-    rainbow10,
+    white,
     rainbow20,
     rainbow20_stopped,
     horsemode,
-    white,
     num_modes,
 };
 
@@ -48,12 +59,8 @@ struct horsemode_state {
 };
 
 struct white_state {
-    void resume(preemption_guard g);
+    void resume(preemption_guard g, uint32_t color);
 };
-
-#define BUTTON_PIN 2
-#define LED_STRIP_DATA_PIN 6
-#define NUM_LEDS 300
 
 // Parameter 1 = number of pixels in strip
 // Parameter 2 = pin number (most are valid)
@@ -82,26 +89,33 @@ void setup() {
 volatile int lastButtonPush = 0;
 void button_isr()
 {
-    if (abs(millis() - lastButtonPush) <= 500) {
+    if (abs(millis() - lastButtonPush) <= 1000) {
         return;
     }
     a.preempt_and_switch_to_next_mode();
     lastButtonPush = millis();
 }
 
+bool didStartInitSeq = false;
+
 void loop() {
+
+#ifdef BOOT_MARKER_ENABLE
+    if (!didStartInitSeq) {
+        didStartInitSeq = true;
+        for (int r = 0; r < 6; r++) {
+            digitalWrite(LED_BUILTIN, r % 2);
+            delay(1000);
+        }
+        digitalWrite(LED_BUILTIN, LOW);
+    }
+#endif /* BOOT_MARKER_ENABLE */
 
     auto guard = a.begin_preemptible();
 
     switch (a.mode) {
         case app_mode::rainbow2:
             st_rainbow.resume(2, guard);
-            break;
-        case app_mode::rainbow5:
-            st_rainbow.resume(5, guard);
-            break;
-        case app_mode::rainbow10:
-            st_rainbow.resume(10, guard);
             break;
         case app_mode::rainbow20:
             st_rainbow.resume(20, guard);
@@ -113,8 +127,23 @@ void loop() {
             st_horsemode.resume(guard);
             break;
         case app_mode::white:
-            st_white.resume(guard);
+            st_white.resume(guard, strip.Color(255, 255, 255));
             break;
+        case app_mode::black:
+            st_white.resume(guard, strip.Color(0, 0, 0));
+            break;
+#ifdef RAMPUP_ENABLE
+        case app_mode::ramp_up:
+            for (int r = 0; r < 3 && !guard.preempted(); r++) {
+                digitalWrite(LED_BUILTIN, r % 2);
+                for (int i = 0; i < strip.numPixels() && !guard.preempted(); i++) {
+                    strip.setPixelColor(i, r, r, r);
+                }
+                strip.show();
+                delay(1000);
+            }
+#endif /* RAMPUP_ENABLE */
+
         default:
             // inidicate missing code by blinking fast for a.mode times
             for (int i = 0; i < a.mode && !guard.preempted(); i++) {
@@ -164,18 +193,20 @@ void rainbow_state::resume(uint8_t wait, preemption_guard g) {
     j = 0;
 }
 
-
 void horsemode_state::resume(preemption_guard g) {
     if (abs(millis() - last_millis) > switch_every_millis) {
         offset++;
         last_millis = millis();
-        for (int i = 0; i < strip.numPixels() && !g.preempted(); i++) {
-            strip.setPixelColor(
-                    i,
-                    255 * ((i + offset) % 3 == 0),
-                    255 * ((i + offset) % 3 == 1),
-                    255 * ((i + offset) % 3 == 2)
-                    );
+        const int stride = 20;
+        for (int s = 0; s < strip.numPixels() - stride && !g.preempted(); s += stride) {
+            for (int i = 0; i < stride && !g.preempted(); i++) {
+                strip.setPixelColor(
+                        s + i,
+                        255 * ((s + offset) % 3 == 0),
+                        255 * ((s + offset) % 3 == 1),
+                        255 * ((s + offset) % 3 == 2)
+                        );
+            }
         }
         if (!g.preempted()) {
             strip.show();
@@ -199,9 +230,9 @@ uint32_t rainbow_state::wheel(byte wheel_pos) {
     }
 }
 
-void white_state::resume(preemption_guard g) {
+void white_state::resume(preemption_guard g, uint32_t color) {
     for (int i = 0; i < strip.numPixels() && !g.preempted(); i++) {
-        strip.setPixelColor(i, 255, 255, 255);
+        strip.setPixelColor(i, color);
     }
     if (!g.preempted()) {
         strip.show();
